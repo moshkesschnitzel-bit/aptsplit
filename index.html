@@ -1,0 +1,813 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>AptSplit 🏠</title>
+<link rel="manifest" href="manifest.json"/>
+<meta name="theme-color" content="#7c6aff"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="apple-mobile-web-app-title" content="AptSplit"/>
+<link rel="apple-touch-icon" href="icon-192.png"/>
+<script>
+  if('serviceWorker' in navigator) {
+    window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js'));
+  }
+</script>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet"/>
+
+<!-- Firebase -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, updateProfile }
+    from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+  import { getFirestore, doc, setDoc, getDoc, collection, addDoc, getDocs, updateDoc, deleteDoc, onSnapshot, query, orderBy, serverTimestamp, where }
+    from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+  // ── YOUR FIREBASE CONFIG ──
+  const firebaseConfig = {
+    apiKey: "AIzaSyCcmAOp61x-Ipl6jN1jZn7BK-TgoJsDlLs",
+    authDomain: "aptsplit-a9fad.firebaseapp.com",
+    projectId: "aptsplit-a9fad",
+    storageBucket: "aptsplit-a9fad.firebasestorage.app",
+    messagingSenderId: "71587479674",
+    appId: "1:71587479674:web:a10655cbc01b894697bbc3"
+  };
+  // ── CLOUDINARY CONFIG ──
+  const CLOUDINARY_CLOUD = "dpylqw980";
+  const CLOUDINARY_PRESET = "pbhgdgna";
+
+  const app = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db = getFirestore(app);
+
+  // ── STATE ──
+  let currentUser = null;
+  let currentApt = null;
+  let currentAptId = null;
+  let isAdmin = false;
+  let unsubscribers = [];
+
+  // ── HELPERS ──
+  const $ = id => document.getElementById(id);
+  const show = id => $(id) && ($(id).style.display = '');
+  const hide = id => $(id) && ($(id).style.display = 'none');
+  const showScreen = name => {
+    document.querySelectorAll('.screen').forEach(s => s.style.display = 'none');
+    const el = $(name + '-screen');
+    if (el) el.style.display = 'flex';
+  };
+  const toast = (msg, type='info') => {
+    const t = document.createElement('div');
+    t.className = 'toast toast-' + type;
+    t.textContent = msg;
+    document.body.appendChild(t);
+    setTimeout(() => t.classList.add('show'), 10);
+    setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 400); }, 3000);
+  };
+  const fmt = n => '₪' + Number(n || 0).toFixed(2);
+
+  // ── AUTH ──
+  onAuthStateChanged(auth, async user => {
+    if (user) {
+      currentUser = user;
+      const snap = await getDoc(doc(db, 'users', user.uid));
+      if (snap.exists() && snap.data().aptId) {
+        currentAptId = snap.data().aptId;
+        await loadApartment();
+        showApp();
+      } else {
+        showScreen('join');
+      }
+    } else {
+      currentUser = null; currentApt = null; currentAptId = null;
+      unsubscribers.forEach(u => u()); unsubscribers = [];
+      showScreen('auth');
+    }
+  });
+
+  async function loadApartment() {
+    const snap = await getDoc(doc(db, 'apartments', currentAptId));
+    if (!snap.exists()) return;
+    currentApt = snap.data();
+    isAdmin = currentApt.adminUid === currentUser.uid;
+  }
+
+  // ── REGISTER ──
+  window.doRegister = async () => {
+    const name = $('reg-name').value.trim();
+    const email = $('reg-email').value.trim();
+    const pass = $('reg-pass').value;
+    if (!name || !email || !pass) return toast('Fill all fields', 'error');
+    try {
+      const cred = await createUserWithEmailAndPassword(auth, email, pass);
+      await updateProfile(cred.user, { displayName: name });
+      toast('Account created!', 'success');
+    } catch(e) { toast(e.message, 'error'); }
+  };
+
+  window.doLogin = async () => {
+    const email = $('login-email').value.trim();
+    const pass = $('login-pass').value;
+    if (!email || !pass) return toast('Fill all fields', 'error');
+    try {
+      await signInWithEmailAndPassword(auth, email, pass);
+    } catch(e) { toast('Wrong email or password', 'error'); }
+  };
+
+  window.doLogout = async () => {
+    unsubscribers.forEach(u => u()); unsubscribers = [];
+    await signOut(auth);
+  };
+
+  // ── CREATE / JOIN APARTMENT ──
+  window.createApt = async () => {
+    const name = $('apt-name').value.trim();
+    const code = $('apt-code').value.trim().toUpperCase();
+    if (!name || !code || code.length < 4) return toast('Enter apt name and a code (min 4 chars)', 'error');
+    // check code not taken
+    const q = query(collection(db, 'apartments'), where('code', '==', code));
+    const existing = await getDocs(q);
+    if (!existing.empty) return toast('Code already taken, choose another', 'error');
+
+    const aptRef = doc(collection(db, 'apartments'));
+    await setDoc(aptRef, {
+      name, code,
+      adminUid: currentUser.uid,
+      monthlyAmount: 150,
+      rentAmount: 0,
+      members: [{ uid: currentUser.uid, name: currentUser.displayName, email: currentUser.email }],
+      createdAt: serverTimestamp()
+    });
+    await setDoc(doc(db, 'users', currentUser.uid), { aptId: aptRef.id });
+    currentAptId = aptRef.id;
+    await loadApartment();
+    showApp();
+    toast('Apartment created! Share code: ' + code, 'success');
+  };
+
+  window.joinApt = async () => {
+    const code = $('join-code').value.trim().toUpperCase();
+    if (!code) return toast('Enter the apartment code', 'error');
+    const q = query(collection(db, 'apartments'), where('code', '==', code));
+    const snaps = await getDocs(q);
+    if (snaps.empty) return toast('No apartment found with that code', 'error');
+    const aptDoc = snaps.docs[0];
+    const aptData = aptDoc.data();
+    const alreadyIn = aptData.members.some(m => m.uid === currentUser.uid);
+    if (!alreadyIn) {
+      await updateDoc(doc(db, 'apartments', aptDoc.id), {
+        members: [...aptData.members, { uid: currentUser.uid, name: currentUser.displayName, email: currentUser.email }]
+      });
+    }
+    await setDoc(doc(db, 'users', currentUser.uid), { aptId: aptDoc.id });
+    currentAptId = aptDoc.id;
+    await loadApartment();
+    showApp();
+    toast('Joined ' + aptData.name + '!', 'success');
+  };
+
+  // ── SHOW APP ──
+  function showApp() {
+    showScreen('app');
+    $('apt-title').textContent = currentApt.name;
+    $('apt-code-display').textContent = 'Code: ' + currentApt.code;
+    $('user-name-display').textContent = currentUser.displayName;
+    if (isAdmin) { show('admin-nav'); show('admin-tab'); }
+    else { hide('admin-nav'); hide('admin-tab'); }
+    loadTab('dashboard');
+    subscribeExpenses();
+    subscribeRent();
+  }
+
+  window.loadTab = tab => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    const btn = document.querySelector(`.tab-btn[data-tab="${tab}"]`);
+    if (btn) btn.classList.add('active');
+    document.querySelectorAll('.tab-content').forEach(t => t.style.display = 'none');
+    const el = $('tab-' + tab);
+    if (el) el.style.display = 'block';
+    if (tab === 'dashboard') renderDashboard();
+    if (tab === 'expenses') renderExpenses();
+    if (tab === 'rent') renderRent();
+    if (tab === 'admin') renderAdmin();
+  };
+
+  // ── EXPENSES ──
+  let allExpenses = [];
+  function subscribeExpenses() {
+    const q = query(collection(db, 'apartments', currentAptId, 'expenses'), orderBy('createdAt', 'desc'));
+    const unsub = onSnapshot(q, snap => {
+      allExpenses = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      renderExpenses();
+      renderDashboard();
+    });
+    unsubscribers.push(unsub);
+  }
+
+  window.uploadReceipt = async () => {
+    const file = $('receipt-file').files[0];
+    const amount = parseFloat($('expense-amount').value);
+    const desc = $('expense-desc').value.trim();
+    if (!amount || amount <= 0) return toast('Enter a valid amount', 'error');
+    if (!desc) return toast('Enter a description', 'error');
+
+    let receiptUrl = '';
+    if (file) {
+      toast('Uploading receipt...', 'info');
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('upload_preset', CLOUDINARY_PRESET);
+      const res = await fetch(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD}/image/upload`, { method: 'POST', body: fd });
+      const data = await res.json();
+      receiptUrl = data.secure_url;
+    }
+
+    const perPerson = amount / currentApt.members.length;
+    await addDoc(collection(db, 'apartments', currentAptId, 'expenses'), {
+      description: desc,
+      amount,
+      perPerson,
+      paidBy: currentUser.uid,
+      paidByName: currentUser.displayName,
+      receiptUrl,
+      members: currentApt.members.map(m => m.uid),
+      createdAt: serverTimestamp()
+    });
+    $('expense-amount').value = '';
+    $('expense-desc').value = '';
+    $('receipt-file').value = '';
+    $('receipt-preview').src = '';
+    $('receipt-preview').style.display = 'none';
+    $('receipt-label').textContent = '📎 Attach Receipt (optional)';
+    toast('Expense added!', 'success');
+  };
+
+  window.previewReceipt = () => {
+    const file = $('receipt-file').files[0];
+    if (!file) return;
+    $('receipt-label').textContent = '✅ ' + file.name;
+    const reader = new FileReader();
+    reader.onload = e => {
+      $('receipt-preview').src = e.target.result;
+      $('receipt-preview').style.display = 'block';
+    };
+    reader.readAsDataURL(file);
+  };
+
+  window.deleteExpense = async id => {
+    if (!isAdmin) return toast('Only admin can delete', 'error');
+    if (!confirm('Delete this expense?')) return;
+    await deleteDoc(doc(db, 'apartments', currentAptId, 'expenses', id));
+    toast('Deleted', 'info');
+  };
+
+  function renderExpenses() {
+    const el = $('expenses-list');
+    if (!el) return;
+    if (!allExpenses.length) { el.innerHTML = '<p class="empty">No expenses yet. Add the first one!</p>'; return; }
+    el.innerHTML = allExpenses.map(e => `
+      <div class="card expense-card">
+        <div class="expense-top">
+          <div>
+            <div class="expense-desc">${e.description}</div>
+            <div class="expense-meta">Paid by <strong>${e.paidByName}</strong> · ${e.createdAt?.toDate ? e.createdAt.toDate().toLocaleDateString() : 'just now'}</div>
+          </div>
+          <div class="expense-amounts">
+            <div class="total-amt">${fmt(e.amount)}</div>
+            <div class="per-person-amt">${fmt(e.perPerson)} / person</div>
+          </div>
+        </div>
+        ${e.receiptUrl ? `<a href="${e.receiptUrl}" target="_blank" class="receipt-link">🧾 View Receipt</a>` : ''}
+        ${isAdmin ? `<button class="btn-danger-sm" onclick="deleteExpense('${e.id}')">🗑 Delete</button>` : ''}
+      </div>
+    `).join('');
+  }
+
+  // ── RENT ──
+  let allRent = [];
+  function subscribeRent() {
+    const q = query(collection(db, 'apartments', currentAptId, 'rent'), orderBy('createdAt', 'desc'));
+    const unsub = onSnapshot(q, snap => {
+      allRent = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      renderRent();
+      renderDashboard();
+    });
+    unsubscribers.push(unsub);
+  }
+
+  window.postRent = async () => {
+    if (!isAdmin) return toast('Only admin can post rent', 'error');
+    const amount = parseFloat($('rent-amount-input').value);
+    const month = $('rent-month').value;
+    if (!amount || !month) return toast('Enter amount and month', 'error');
+    await addDoc(collection(db, 'apartments', currentAptId, 'rent'), {
+      amount,
+      month,
+      perPerson: amount / currentApt.members.length,
+      payments: {},
+      createdAt: serverTimestamp()
+    });
+    $('rent-amount-input').value = '';
+    toast('Rent posted!', 'success');
+  };
+
+  window.markRentPaid = async (rentId) => {
+    const rentRef = doc(db, 'apartments', currentAptId, 'rent', rentId);
+    const snap = await getDoc(rentRef);
+    const payments = snap.data().payments || {};
+    payments[currentUser.uid] = { name: currentUser.displayName, paidAt: new Date().toISOString() };
+    await updateDoc(rentRef, { payments });
+    toast('Marked as paid!', 'success');
+  };
+
+  window.unmarkRentPaid = async (rentId) => {
+    if (!isAdmin) return toast('Only admin can unmark', 'error');
+    const rentRef = doc(db, 'apartments', currentAptId, 'rent', rentId);
+    const snap = await getDoc(rentRef);
+    const payments = snap.data().payments || {};
+    delete payments[currentUser.uid];
+    await updateDoc(rentRef, { payments });
+    toast('Unmarked', 'info');
+  };
+
+  window.adminToggleRent = async (rentId, uid) => {
+    if (!isAdmin) return;
+    const rentRef = doc(db, 'apartments', currentAptId, 'rent', rentId);
+    const snap = await getDoc(rentRef);
+    const payments = { ...(snap.data().payments || {}) };
+    const member = currentApt.members.find(m => m.uid === uid);
+    if (payments[uid]) { delete payments[uid]; }
+    else { payments[uid] = { name: member?.name || '?', paidAt: new Date().toISOString() }; }
+    await updateDoc(rentRef, { payments });
+  };
+
+  window.deleteRent = async id => {
+    if (!isAdmin) return;
+    if (!confirm('Delete this rent entry?')) return;
+    await deleteDoc(doc(db, 'apartments', currentAptId, 'rent', id));
+    toast('Deleted', 'info');
+  };
+
+  function renderRent() {
+    const el = $('rent-list');
+    if (!el) return;
+    // Post rent form visibility
+    const postForm = $('post-rent-form');
+    if (postForm) postForm.style.display = isAdmin ? 'block' : 'none';
+
+    if (!allRent.length) { el.innerHTML = '<p class="empty">No rent posted yet.</p>'; return; }
+    el.innerHTML = allRent.map(r => {
+      const payments = r.payments || {};
+      const iHavePaid = payments[currentUser.uid];
+      const rows = currentApt.members.map(m => {
+        const paid = payments[m.uid];
+        return `<div class="rent-member-row">
+          <span class="${paid ? 'paid-name' : 'unpaid-name'}">${paid ? '✅' : '❌'} ${m.name}</span>
+          ${isAdmin && m.uid !== currentUser.uid ? `<button class="btn-tiny" onclick="adminToggleRent('${r.id}','${m.uid}')">${paid ? 'Unmark' : 'Mark paid'}</button>` : ''}
+          ${paid ? `<span class="paid-date">${new Date(paid.paidAt).toLocaleDateString()}</span>` : ''}
+        </div>`;
+      }).join('');
+      return `<div class="card">
+        <div class="rent-header">
+          <div>
+            <div class="rent-month-title">${r.month}</div>
+            <div class="rent-total">${fmt(r.amount)} total · ${fmt(r.perPerson)} / person</div>
+          </div>
+          <div class="rent-actions">
+            ${!iHavePaid ? `<button class="btn-success" onclick="markRentPaid('${r.id}')">I Paid</button>` : `<button class="btn-outline" onclick="unmarkRentPaid('${r.id}')">Undo</button>`}
+            ${isAdmin ? `<button class="btn-danger-sm" onclick="deleteRent('${r.id}')">🗑</button>` : ''}
+          </div>
+        </div>
+        <div class="rent-members">${rows}</div>
+      </div>`;
+    }).join('');
+  }
+
+  // ── DASHBOARD ──
+  function renderDashboard() {
+    const el = $('dashboard-content');
+    if (!el || !currentApt) return;
+
+    // Balances per person from expenses
+    const balances = {};
+    currentApt.members.forEach(m => balances[m.uid] = { name: m.name, paid: 0, owes: 0 });
+
+    allExpenses.forEach(e => {
+      if (balances[e.paidBy] !== undefined) balances[e.paidBy].paid += e.amount;
+      e.members?.forEach(uid => {
+        if (balances[uid] !== undefined) balances[uid].owes += e.perPerson;
+      });
+    });
+
+    // Monthly contribution status
+    const monthlyAmt = currentApt.monthlyAmount || 150;
+
+    // Rent summary (latest)
+    const latestRent = allRent[0];
+    const rentPaidCount = latestRent ? Object.keys(latestRent.payments || {}).length : 0;
+    const rentTotal = latestRent ? currentApt.members.length : 0;
+
+    el.innerHTML = `
+      <div class="dash-summary">
+        <div class="dash-card dash-blue">
+          <div class="dash-label">Monthly Contribution</div>
+          <div class="dash-value">${fmt(monthlyAmt)}</div>
+          <div class="dash-sub">per person / month</div>
+        </div>
+        <div class="dash-card dash-green">
+          <div class="dash-label">Total Expenses</div>
+          <div class="dash-value">${fmt(allExpenses.reduce((s, e) => s + e.amount, 0))}</div>
+          <div class="dash-sub">${allExpenses.length} transactions</div>
+        </div>
+        <div class="dash-card dash-orange">
+          <div class="dash-label">Latest Rent</div>
+          <div class="dash-value">${latestRent ? rentPaidCount + '/' + rentTotal : 'N/A'}</div>
+          <div class="dash-sub">${latestRent ? latestRent.month + ' paid' : 'No rent posted'}</div>
+        </div>
+      </div>
+
+      <div class="section-title">Member Balances</div>
+      <div class="balance-list">
+        ${currentApt.members.map(m => {
+          const b = balances[m.uid] || { paid: 0, owes: 0 };
+          const net = b.paid - b.owes;
+          return `<div class="balance-row">
+            <div class="balance-avatar">${(m.name || '?')[0].toUpperCase()}</div>
+            <div class="balance-info">
+              <div class="balance-name">${m.name}</div>
+              <div class="balance-detail">Paid ${fmt(b.paid)} · Owes ${fmt(b.owes)}</div>
+            </div>
+            <div class="balance-net ${net >= 0 ? 'net-pos' : 'net-neg'}">${net >= 0 ? '+' : ''}${fmt(net)}</div>
+          </div>`;
+        }).join('')}
+      </div>
+    `;
+  }
+
+  // ── ADMIN ──
+  function renderAdmin() {
+    const el = $('admin-content');
+    if (!el || !currentApt) return;
+    el.innerHTML = `
+      <div class="card">
+        <div class="admin-section-title">⚙️ Apartment Settings</div>
+
+        <label class="field-label">Apartment Name</label>
+        <input class="field-input" id="admin-apt-name" value="${currentApt.name}"/>
+
+        <label class="field-label">Monthly Contribution (₪)</label>
+        <input class="field-input" type="number" id="admin-monthly" value="${currentApt.monthlyAmount || 150}"/>
+
+        <label class="field-label">Apartment Code (share with roommates)</label>
+        <div class="code-display">${currentApt.code}</div>
+
+        <button class="btn-primary" onclick="saveAdminSettings()">💾 Save Settings</button>
+      </div>
+
+      <div class="card">
+        <div class="admin-section-title">👥 Members (${currentApt.members.length})</div>
+        ${currentApt.members.map(m => `
+          <div class="member-row">
+            <div class="balance-avatar">${(m.name||'?')[0].toUpperCase()}</div>
+            <div>
+              <div class="member-name">${m.name} ${m.uid === currentApt.adminUid ? '<span class="admin-badge">Admin</span>' : ''}</div>
+              <div class="member-email">${m.email}</div>
+            </div>
+            ${m.uid !== currentUser.uid ? `<button class="btn-danger-sm" onclick="removeMember('${m.uid}')">Remove</button>` : ''}
+          </div>
+        `).join('')}
+      </div>
+    `;
+  }
+
+  window.saveAdminSettings = async () => {
+    const name = $('admin-apt-name').value.trim();
+    const monthly = parseFloat($('admin-monthly').value);
+    if (!name || isNaN(monthly)) return toast('Invalid input', 'error');
+    await updateDoc(doc(db, 'apartments', currentAptId), { name, monthlyAmount: monthly });
+    currentApt.name = name;
+    currentApt.monthlyAmount = monthly;
+    $('apt-title').textContent = name;
+    toast('Settings saved!', 'success');
+  };
+
+  window.removeMember = async uid => {
+    if (!isAdmin) return toast('Only admin', 'error');
+    if (!confirm('Remove this member?')) return;
+    const members = currentApt.members.filter(m => m.uid !== uid);
+    await updateDoc(doc(db, 'apartments', currentAptId), { members });
+    currentApt.members = members;
+    renderAdmin();
+    toast('Member removed', 'info');
+  };
+
+  // ── TAB TOGGLE AUTH ──
+  window.showAuthTab = tab => {
+    $('tab-login').style.display = tab === 'login' ? 'block' : 'none';
+    $('tab-register').style.display = tab === 'register' ? 'block' : 'none';
+    document.querySelectorAll('.auth-tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelector(`.auth-tab-btn[data-tab="${tab}"]`).classList.add('active');
+  };
+
+  window.showJoinCreate = view => {
+    $('join-view').style.display = view === 'join' ? 'block' : 'none';
+    $('create-view').style.display = view === 'create' ? 'block' : 'none';
+    document.querySelectorAll('.join-tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelector(`.join-tab-btn[data-view="${view}"]`).classList.add('active');
+  };
+</script>
+
+<style>
+  :root {
+    --bg: #0f0f13;
+    --surface: #1a1a22;
+    --surface2: #22222e;
+    --border: #2e2e3e;
+    --accent: #7c6aff;
+    --accent2: #00e5b0;
+    --danger: #ff4f6d;
+    --warn: #ffb347;
+    --text: #f0f0f8;
+    --muted: #888899;
+    --success: #00c896;
+    --radius: 14px;
+    --font: 'DM Sans', sans-serif;
+    --heading: 'Syne', sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: var(--font); min-height: 100vh; }
+
+  /* SCREENS */
+  .screen { display: none; min-height: 100vh; flex-direction: column; align-items: center; justify-content: center; padding: 24px; }
+
+  /* AUTH */
+  .auth-box { background: var(--surface); border: 1px solid var(--border); border-radius: 20px; padding: 36px; width: 100%; max-width: 420px; }
+  .logo { font-family: var(--heading); font-size: 2rem; font-weight: 800; color: var(--accent); margin-bottom: 6px; text-align: center; }
+  .logo span { color: var(--accent2); }
+  .tagline { text-align: center; color: var(--muted); margin-bottom: 28px; font-size: 0.9rem; }
+  .auth-tabs { display: flex; gap: 4px; background: var(--surface2); border-radius: 10px; padding: 4px; margin-bottom: 24px; }
+  .auth-tab-btn { flex: 1; padding: 10px; border: none; background: transparent; color: var(--muted); font-family: var(--font); font-size: 0.9rem; border-radius: 8px; cursor: pointer; transition: all 0.2s; }
+  .auth-tab-btn.active { background: var(--accent); color: white; font-weight: 600; }
+
+  /* FIELDS */
+  .field-label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 6px; margin-top: 16px; text-transform: uppercase; letter-spacing: 0.05em; }
+  .field-input { width: 100%; background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; color: var(--text); font-family: var(--font); font-size: 1rem; transition: border 0.2s; }
+  .field-input:focus { outline: none; border-color: var(--accent); }
+  .btn-primary { width: 100%; margin-top: 20px; padding: 14px; background: var(--accent); color: white; border: none; border-radius: 10px; font-family: var(--heading); font-size: 1rem; font-weight: 700; cursor: pointer; transition: opacity 0.2s, transform 0.1s; }
+  .btn-primary:hover { opacity: 0.9; transform: translateY(-1px); }
+  .btn-primary:active { transform: translateY(0); }
+
+  /* JOIN SCREEN */
+  .join-box { background: var(--surface); border: 1px solid var(--border); border-radius: 20px; padding: 36px; width: 100%; max-width: 440px; }
+  .join-tabs { display: flex; gap: 4px; background: var(--surface2); border-radius: 10px; padding: 4px; margin-bottom: 24px; }
+  .join-tab-btn { flex: 1; padding: 10px; border: none; background: transparent; color: var(--muted); font-family: var(--font); border-radius: 8px; cursor: pointer; transition: all 0.2s; }
+  .join-tab-btn.active { background: var(--accent2); color: #0f0f13; font-weight: 600; }
+
+  /* MAIN APP */
+  #app-screen { display: none; flex-direction: column; min-height: 100vh; padding: 0; align-items: stretch; justify-content: flex-start; }
+  .app-header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 16px 20px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 100; }
+  .apt-title-wrap { display: flex; flex-direction: column; }
+  .apt-title { font-family: var(--heading); font-size: 1.2rem; font-weight: 800; color: var(--text); }
+  .apt-code { font-size: 0.75rem; color: var(--accent2); font-weight: 600; }
+  .header-right { display: flex; align-items: center; gap: 12px; }
+  .user-chip { background: var(--surface2); border: 1px solid var(--border); border-radius: 20px; padding: 6px 14px; font-size: 0.85rem; color: var(--muted); }
+  .logout-btn { background: transparent; border: 1px solid var(--border); border-radius: 8px; color: var(--muted); padding: 6px 12px; cursor: pointer; font-size: 0.8rem; transition: all 0.2s; }
+  .logout-btn:hover { border-color: var(--danger); color: var(--danger); }
+
+  /* TABS */
+  .tab-bar { display: flex; background: var(--surface); border-bottom: 1px solid var(--border); overflow-x: auto; }
+  .tab-btn { padding: 14px 20px; border: none; background: transparent; color: var(--muted); font-family: var(--font); font-size: 0.9rem; cursor: pointer; white-space: nowrap; border-bottom: 3px solid transparent; transition: all 0.2s; }
+  .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+  .tab-content { display: none; padding: 20px; max-width: 700px; margin: 0 auto; width: 100%; }
+
+  /* CARDS */
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; margin-bottom: 16px; }
+  .section-title { font-family: var(--heading); font-size: 1rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; margin: 20px 0 12px; }
+
+  /* DASHBOARD */
+  .dash-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 24px; }
+  .dash-card { border-radius: var(--radius); padding: 18px; border: 1px solid var(--border); }
+  .dash-blue { background: #1a1a3a; border-color: #3a3a6a; }
+  .dash-green { background: #0f2a20; border-color: #1a4a35; }
+  .dash-orange { background: #2a1f0f; border-color: #4a3520; }
+  .dash-label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
+  .dash-value { font-family: var(--heading); font-size: 1.6rem; font-weight: 800; color: var(--text); }
+  .dash-sub { font-size: 0.75rem; color: var(--muted); margin-top: 4px; }
+
+  .balance-list { display: flex; flex-direction: column; gap: 10px; }
+  .balance-row { display: flex; align-items: center; gap: 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+  .balance-avatar { width: 38px; height: 38px; border-radius: 50%; background: var(--accent); display: flex; align-items: center; justify-content: center; font-family: var(--heading); font-weight: 800; font-size: 1rem; flex-shrink: 0; }
+  .balance-info { flex: 1; }
+  .balance-name { font-weight: 600; font-size: 0.95rem; }
+  .balance-detail { font-size: 0.78rem; color: var(--muted); margin-top: 2px; }
+  .balance-net { font-family: var(--heading); font-weight: 800; font-size: 1.1rem; }
+  .net-pos { color: var(--success); }
+  .net-neg { color: var(--danger); }
+
+  /* EXPENSES */
+  .add-expense-card { background: linear-gradient(135deg, #1a1a2e, #16213e); border: 1px solid #3a3a5e; border-radius: var(--radius); padding: 20px; margin-bottom: 20px; }
+  .add-expense-title { font-family: var(--heading); font-weight: 700; font-size: 1.1rem; margin-bottom: 4px; }
+  .add-expense-sub { font-size: 0.8rem; color: var(--muted); margin-bottom: 16px; }
+  .input-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .receipt-upload { margin-top: 14px; }
+  .receipt-btn { display: inline-block; background: var(--surface2); border: 1px dashed var(--border); border-radius: 10px; padding: 10px 16px; cursor: pointer; font-size: 0.85rem; color: var(--muted); transition: all 0.2s; width: 100%; text-align: center; }
+  .receipt-btn:hover { border-color: var(--accent); color: var(--accent); }
+  #receipt-preview { max-width: 100%; max-height: 180px; border-radius: 10px; margin-top: 10px; display: none; object-fit: cover; }
+
+  .expense-card { }
+  .expense-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+  .expense-desc { font-weight: 600; font-size: 1rem; margin-bottom: 4px; }
+  .expense-meta { font-size: 0.78rem; color: var(--muted); }
+  .expense-amounts { text-align: right; flex-shrink: 0; }
+  .total-amt { font-family: var(--heading); font-weight: 800; font-size: 1.2rem; color: var(--accent2); }
+  .per-person-amt { font-size: 0.75rem; color: var(--muted); }
+  .receipt-link { display: inline-block; margin-top: 10px; font-size: 0.8rem; color: var(--accent); text-decoration: none; }
+  .receipt-link:hover { text-decoration: underline; }
+
+  /* RENT */
+  .post-rent-card { background: linear-gradient(135deg, #0f2a20, #0a1f15); border: 1px solid #1a4a35; border-radius: var(--radius); padding: 20px; margin-bottom: 20px; }
+  .rent-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px; }
+  .rent-month-title { font-family: var(--heading); font-weight: 800; font-size: 1.1rem; }
+  .rent-total { font-size: 0.82rem; color: var(--muted); margin-top: 3px; }
+  .rent-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .rent-members { display: flex; flex-direction: column; gap: 8px; }
+  .rent-member-row { display: flex; align-items: center; gap: 10px; font-size: 0.88rem; }
+  .paid-name { color: var(--success); }
+  .unpaid-name { color: var(--muted); }
+  .paid-date { font-size: 0.75rem; color: var(--muted); margin-left: auto; }
+
+  /* ADMIN */
+  .admin-section-title { font-family: var(--heading); font-weight: 700; font-size: 1rem; margin-bottom: 16px; color: var(--accent); }
+  .code-display { background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; font-family: monospace; font-size: 1.2rem; letter-spacing: 0.15em; color: var(--accent2); margin-top: 6px; margin-bottom: 16px; }
+  .member-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .member-row:last-child { border-bottom: none; }
+  .member-name { font-weight: 600; font-size: 0.9rem; }
+  .member-email { font-size: 0.75rem; color: var(--muted); }
+  .admin-badge { background: var(--accent); color: white; font-size: 0.65rem; padding: 2px 6px; border-radius: 4px; margin-left: 6px; }
+
+  /* BUTTONS */
+  .btn-success { background: var(--success); color: #0f0f13; border: none; padding: 8px 16px; border-radius: 8px; font-weight: 700; cursor: pointer; font-size: 0.85rem; transition: opacity 0.2s; }
+  .btn-success:hover { opacity: 0.85; }
+  .btn-outline { background: transparent; border: 1px solid var(--border); color: var(--muted); padding: 8px 14px; border-radius: 8px; cursor: pointer; font-size: 0.82rem; }
+  .btn-danger-sm { background: transparent; border: 1px solid var(--danger); color: var(--danger); padding: 6px 12px; border-radius: 8px; cursor: pointer; font-size: 0.8rem; margin-left: auto; }
+  .btn-tiny { background: var(--surface2); border: 1px solid var(--border); color: var(--muted); padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 0.75rem; }
+  .btn-accent2 { background: var(--accent2); color: #0f0f13; border: none; padding: 12px 20px; border-radius: 10px; font-family: var(--heading); font-weight: 700; cursor: pointer; font-size: 0.95rem; margin-top: 16px; width: 100%; transition: opacity 0.2s; }
+  .btn-accent2:hover { opacity: 0.85; }
+
+  /* TOAST */
+  .toast { position: fixed; bottom: 24px; right: 24px; background: var(--surface2); border: 1px solid var(--border); border-radius: 12px; padding: 12px 20px; font-size: 0.9rem; transform: translateY(20px); opacity: 0; transition: all 0.3s; z-index: 9999; max-width: 320px; }
+  .toast.show { transform: translateY(0); opacity: 1; }
+  .toast-success { border-color: var(--success); color: var(--success); }
+  .toast-error { border-color: var(--danger); color: var(--danger); }
+  .toast-info { border-color: var(--accent); color: var(--accent); }
+
+  .empty { color: var(--muted); text-align: center; padding: 40px 20px; font-size: 0.9rem; }
+
+  @media (max-width: 500px) {
+    .dash-summary { grid-template-columns: 1fr; }
+    .input-row { grid-template-columns: 1fr; }
+    .app-header { flex-wrap: wrap; gap: 8px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- AUTH SCREEN -->
+<div id="auth-screen" class="screen">
+  <div class="auth-box">
+    <div class="logo">Apt<span>Split</span></div>
+    <div class="tagline">Apartment expenses, sorted. 🏠</div>
+    <div class="auth-tabs">
+      <button class="auth-tab-btn active" data-tab="login" onclick="showAuthTab('login')">Login</button>
+      <button class="auth-tab-btn" data-tab="register" onclick="showAuthTab('register')">Register</button>
+    </div>
+    <div id="tab-login">
+      <label class="field-label">Email</label>
+      <input class="field-input" id="login-email" type="email" placeholder="you@email.com"/>
+      <label class="field-label">Password</label>
+      <input class="field-input" id="login-pass" type="password" placeholder="••••••••"/>
+      <button class="btn-primary" onclick="doLogin()">Sign In</button>
+    </div>
+    <div id="tab-register" style="display:none">
+      <label class="field-label">Your Name</label>
+      <input class="field-input" id="reg-name" placeholder="e.g. David"/>
+      <label class="field-label">Email</label>
+      <input class="field-input" id="reg-email" type="email" placeholder="you@email.com"/>
+      <label class="field-label">Password</label>
+      <input class="field-input" id="reg-pass" type="password" placeholder="min 6 characters"/>
+      <button class="btn-primary" onclick="doRegister()">Create Account</button>
+    </div>
+  </div>
+</div>
+
+<!-- JOIN/CREATE APARTMENT SCREEN -->
+<div id="join-screen" class="screen">
+  <div class="join-box">
+    <div class="logo">Apt<span>Split</span></div>
+    <div class="tagline">Join your apartment or create one</div>
+    <div class="join-tabs">
+      <button class="join-tab-btn active" data-view="join" onclick="showJoinCreate('join')">Join Apartment</button>
+      <button class="join-tab-btn" data-view="create" onclick="showJoinCreate('create')">Create New</button>
+    </div>
+    <div id="join-view">
+      <label class="field-label">Apartment Code</label>
+      <input class="field-input" id="join-code" placeholder="e.g. APT123" style="text-transform:uppercase"/>
+      <p style="font-size:0.8rem;color:var(--muted);margin-top:8px">Ask your admin for the apartment code</p>
+      <button class="btn-accent2" onclick="joinApt()">Join Apartment</button>
+    </div>
+    <div id="create-view" style="display:none">
+      <label class="field-label">Apartment Name</label>
+      <input class="field-input" id="apt-name" placeholder="e.g. Dizengoff 42"/>
+      <label class="field-label">Create a Code (share with roommates)</label>
+      <input class="field-input" id="apt-code" placeholder="e.g. DIZENGOFF42" style="text-transform:uppercase"/>
+      <p style="font-size:0.8rem;color:var(--muted);margin-top:8px">You become the admin of this apartment</p>
+      <button class="btn-accent2" onclick="createApt()">Create Apartment</button>
+    </div>
+    <div style="margin-top:20px;text-align:center">
+      <button onclick="doLogout()" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:0.85rem">← Back to login</button>
+    </div>
+  </div>
+</div>
+
+<!-- MAIN APP SCREEN -->
+<div id="app-screen" class="screen">
+  <div class="app-header">
+    <div class="apt-title-wrap">
+      <div class="apt-title" id="apt-title">AptSplit</div>
+      <div class="apt-code" id="apt-code-display"></div>
+    </div>
+    <div class="header-right">
+      <div class="user-chip" id="user-name-display"></div>
+      <button class="logout-btn" onclick="doLogout()">Sign out</button>
+    </div>
+  </div>
+
+  <div class="tab-bar">
+    <button class="tab-btn active" data-tab="dashboard" onclick="loadTab('dashboard')">📊 Dashboard</button>
+    <button class="tab-btn" data-tab="expenses" onclick="loadTab('expenses')">💸 Expenses</button>
+    <button class="tab-btn" data-tab="rent" onclick="loadTab('rent')">🏠 Rent</button>
+    <button class="tab-btn" id="admin-nav" data-tab="admin" onclick="loadTab('admin')" style="display:none">⚙️ Admin</button>
+  </div>
+
+  <!-- DASHBOARD TAB -->
+  <div class="tab-content" id="tab-dashboard">
+    <div id="dashboard-content"></div>
+  </div>
+
+  <!-- EXPENSES TAB -->
+  <div class="tab-content" id="tab-expenses">
+    <div class="add-expense-card">
+      <div class="add-expense-title">Log a Mid-Month Expense</div>
+      <div class="add-expense-sub">Amount is split equally among all members</div>
+      <div class="input-row">
+        <div>
+          <label class="field-label">Amount (₪)</label>
+          <input class="field-input" type="number" id="expense-amount" placeholder="0.00"/>
+        </div>
+        <div>
+          <label class="field-label">Description</label>
+          <input class="field-input" id="expense-desc" placeholder="e.g. Cleaning supplies"/>
+        </div>
+      </div>
+      <div class="receipt-upload">
+        <input type="file" id="receipt-file" accept="image/*" style="display:none" onchange="previewReceipt()"/>
+        <label class="receipt-btn" id="receipt-label" for="receipt-file">📎 Attach Receipt (optional)</label>
+        <img id="receipt-preview" alt="Receipt preview"/>
+      </div>
+      <button class="btn-accent2" onclick="uploadReceipt()">➕ Add Expense</button>
+    </div>
+    <div class="section-title">All Expenses</div>
+    <div id="expenses-list"></div>
+  </div>
+
+  <!-- RENT TAB -->
+  <div class="tab-content" id="tab-rent">
+    <div id="post-rent-form" class="post-rent-card" style="display:none">
+      <div class="add-expense-title">📢 Post Rent</div>
+      <div class="add-expense-sub">Notify roommates about rent payment</div>
+      <div class="input-row">
+        <div>
+          <label class="field-label">Total Rent (₪)</label>
+          <input class="field-input" type="number" id="rent-amount-input" placeholder="0.00"/>
+        </div>
+        <div>
+          <label class="field-label">Month</label>
+          <input class="field-input" id="rent-month" placeholder="e.g. June 2026"/>
+        </div>
+      </div>
+      <button class="btn-accent2" onclick="postRent()">📢 Post Rent</button>
+    </div>
+    <div class="section-title">Rent History</div>
+    <div id="rent-list"></div>
+  </div>
+
+  <!-- ADMIN TAB -->
+  <div class="tab-content" id="tab-admin" style="display:none">
+    <div id="admin-content"></div>
+  </div>
+</div>
+
+</body>
+</html>
