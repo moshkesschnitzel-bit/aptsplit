@@ -1,9 +1,9 @@
 {
   "appId": "com.aptsplit.app",
   "appName": "AptSplit",
-  "webDir": ".",
+  "webDir": "www",
   "server": {
-    "url": "https://aptsplit.netlify.app/",
+    "url": "https://YOUR-NETLIFY-URL.netlify.app",
     "cleartext": true
   }
 }
