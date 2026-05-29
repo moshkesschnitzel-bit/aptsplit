@@ -3,7 +3,7 @@
   "appName": "AptSplit",
   "webDir": "www",
   "server": {
-    "url": "https://YOUR-NETLIFY-URL.netlify.app",
+    "url": "https://aptsplit.netlify.app/",
     "cleartext": true
   }
 }
